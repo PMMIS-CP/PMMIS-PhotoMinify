@@ -10,13 +10,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'نسخه انتشار'
+        description: '0.1.1-beta'
         required: false
         default: '0.1.1-beta'
       release_notes:
-        description: 'توضیحات انتشار'
+        description: 'Build'
         required: false
-        default: 'نسخه بتا'
+        default: 'version beta'
 
 jobs:
   build:
@@ -68,7 +68,7 @@ jobs:
         generate_release_notes: true
         prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
     - name: Create Manual Release
       if: github.event_name == 'workflow_dispatch'
@@ -80,4 +80,4 @@ jobs:
         files: dist/WebP_Converter_${{ env.VERSION }}.exe
         prerelease: ${{ contains(github.event.inputs.version, 'beta') || contains(github.event.inputs.version, 'alpha') }}
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
