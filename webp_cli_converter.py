@@ -1,3 +1,4 @@
+# webp_cli_converter.py
 import os
 from PIL import Image
 

@@ -20,12 +20,23 @@ except ImportError:
 
 import image_converter
 
+def get_icon_path():
+    """Get absolute path to icon, works both in development and PyInstaller bundle"""
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_path, 'logo.ico')
+
 def load_persian_font():
     """
     Load Vazir font and return the font object.
     Tries multiple possible filenames and locations.
     """
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if getattr(sys, 'frozen', False):
+        script_dir = sys._MEIPASS
+    else:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
     
     possible_font_filenames = [
         "Vazir.ttf",
@@ -151,8 +162,19 @@ class ImageConverterGUI(QMainWindow):
     DEFAULT_SIZE_NAME = "پیش‌فرض (600x650)"
     DEFAULT_THEME = 'dark_amber.xml'
 
+    def set_icon_for_child_dialogs(self):
+        """Ensure all child dialogs inherit the application icon"""
+        icon_path = get_icon_path()
+        if os.path.exists(icon_path):
+            app_icon = QIcon(icon_path)
+            QApplication.instance().setWindowIcon(app_icon)
+
     def __init__(self):
         super().__init__()
+        # تنظیم آیکون پنجره
+        icon_path = get_icon_path()
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         self.current_theme_name = self.DEFAULT_THEME
         self.setWindowTitle("کاهش حجم عکس")
 
@@ -173,7 +195,7 @@ class ImageConverterGUI(QMainWindow):
         # Apply Persian font immediately after UI creation
         if QApplication.instance().property("persian_font_family"):
             self._apply_persian_font()
-
+        self.set_icon_for_child_dialogs()
         # --- DEBUG: Check if font is actually applied to widgets ---
         print(f"[DEBUG] Main window font family: {self.font().family()}")
         print(f"[DEBUG] Main window font info: {self.font().toString()}")
@@ -611,6 +633,14 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
     
+    icon_path = get_icon_path()
+    if os.path.exists(icon_path):
+        app_icon = QIcon(icon_path)
+        app.setWindowIcon(app_icon)
+        print(f"[DEBUG] Application icon set from: {icon_path}")
+    else:
+        print(f"[DEBUG] WARNING: Icon file not found at: {icon_path}")
+    
     # --- Load Persian Font ---
     vazir_font, font_family = load_persian_font()
     
@@ -660,7 +690,6 @@ if __name__ == "__main__":
     # --- Create and show window ---
     window = ImageConverterGUI()
     
-    # Final font application to all widgets
     # Final font application to all widgets
     if font_family:
         vazir_font = QFont(font_family, 10)
@@ -717,6 +746,11 @@ if __name__ == "__main__":
         
         print(f"[DEBUG] Cleared widget stylesheets and applied font directly (including menus)")
     
+    # --- Re-apply icon after window creation (ensures window icon is set) ---
+    if os.path.exists(icon_path):
+        window.setWindowIcon(QIcon(icon_path))
+        print(f"[DEBUG] Window icon re-applied")
+    
     window.show()
     
     # Debug
@@ -724,6 +758,8 @@ if __name__ == "__main__":
     print("[DEBUG] FINAL STATUS:")
     print(f"[DEBUG] App font: {app.font().family()}")
     print(f"[DEBUG] Window font: {window.font().family()}")
+    print(f"[DEBUG] App icon set: {not app.windowIcon().isNull()}")
+    print(f"[DEBUG] Window icon set: {not window.windowIcon().isNull()}")
     if hasattr(window, 'input_folder_label'):
         print(f"[DEBUG] Label font: {window.input_folder_label.font().family()}")
         print(f"[DEBUG] Label text: '{window.input_folder_label.text()}'")

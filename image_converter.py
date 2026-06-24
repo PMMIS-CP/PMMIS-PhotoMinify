@@ -40,15 +40,12 @@ def convert_image_to_webp(input_filepath, output_filepath, quality=80, lossless=
     if output_dir_path:
         os.makedirs(output_dir_path, exist_ok=True)
 
-    # برای فایل‌های WebP: فقط فشرده‌سازی با quality
-    # برای سایر فرمت‌ها: تبدیل با quality
     cmd = [
         magick,
         input_filepath,
         "-quality", str(quality),
     ]
     
-    # فقط برای فایل‌های غیر WebP lossless رو اضافه کن
     if not input_filepath.lower().endswith('.webp'):
         cmd.extend(["-define", f"webp:lossless={str(lossless).lower()}"])
     
