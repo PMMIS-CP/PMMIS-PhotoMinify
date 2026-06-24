@@ -1,51 +1,80 @@
 # image_converter.py
 import os
-import sys # For dummy image creation in __main__
-from PIL import Image
-# tqdm is optional here if progress_callback is always used by the GUI
-# but good for standalone use or debugging.
+import sys
+import subprocess
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+
+def get_magick_path():
+    """
+    Returns the absolute path to magick.exe.
+    When running from source, looks in the same directory as this script.
+    When bundled by PyInstaller, looks inside the temporary extraction folder.
+    """
+    if getattr(sys, 'frozen', False):
+        # PyInstaller creates a temporary folder and stores path in sys._MEIPASS
+        base_path = sys._MEIPASS
+    else:
+        # Normal Python execution: use the directory of this script
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    magick_exe = os.path.join(base_path, 'magick.exe')
+    if not os.path.isfile(magick_exe):
+        raise FileNotFoundError(
+            f"ImageMagick executable not found at:\n{magick_exe}\n"
+            "Please place magick.exe in the project root and try again."
+        )
+    return magick_exe
+
 
 def convert_image_to_webp(input_filepath, output_filepath, quality=80, lossless=False):
-    """Converts a single image to WebP format."""
+    """Converts a single image to WebP format using ImageMagick."""
     try:
-        img = Image.open(input_filepath)
-        # Ensure output directory for this specific file exists
-        os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
-        img.save(output_filepath, 'webp', quality=quality, lossless=lossless)
-        return True  # Indicate success
-    except FileNotFoundError:
-        # This error should ideally be caught before calling this function if input_filepath comes from a list
-        print(f"Error: Input file not found during conversion: {input_filepath}")
+        magick = get_magick_path()
+    except FileNotFoundError as e:
+        print(f"Configuration error: {e}")
         return False
+
+    output_dir_path = os.path.dirname(output_filepath)
+    if output_dir_path:
+        os.makedirs(output_dir_path, exist_ok=True)
+
+    # برای فایل‌های WebP: فقط فشرده‌سازی با quality
+    # برای سایر فرمت‌ها: تبدیل با quality
+    cmd = [
+        magick,
+        input_filepath,
+        "-quality", str(quality),
+    ]
+    
+    # فقط برای فایل‌های غیر WebP lossless رو اضافه کن
+    if not input_filepath.lower().endswith('.webp'):
+        cmd.extend(["-define", f"webp:lossless={str(lossless).lower()}"])
+    
+    cmd.append(output_filepath)
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        if result.returncode != 0:
+            print(f"ImageMagick error converting {input_filepath}: {result.stderr.strip()}")
+            return False
+        return True
     except Exception as e:
-        print(f"Error converting {input_filepath} to {output_filepath}: {e}")
+        print(f"Unexpected error while calling ImageMagick for {input_filepath}: {e}")
         return False
+
 
 def process_images(input_path, output_dir=None, quality=80, lossless=False,
-                   recursive=False, no_overwrite=False, progress_callback=None):
-    """
-    Processes images (PNG, JPG, JPEG) from input_path and converts them to WebP.
-
-    Args:
-        input_path (str): Path to a single image file or a directory of images.
-        output_dir (str, optional): Directory to save converted WebP images.
-                                    If None, WebP images are saved alongside originals.
-                                    If recursive and output_dir is specified, subfolder
-                                    structure from input_path is mirrored in output_dir.
-        quality (int): WebP quality setting (0-100).
-        lossless (bool): If True, use lossless WebP compression.
-        recursive (bool): If True and input_path is a directory, process subdirectories.
-        no_overwrite (bool): If True, do not overwrite existing WebP files in the output.
-        progress_callback (function, optional): Callback for progress updates.
-                                                Expected signature: func(current, total, message_str)
-    """
+                   recursive=False, no_overwrite=False, progress_callback=None,
+                   parallel=False, max_workers=None):
+    """Process images and convert to WebP using ImageMagick."""
 
     images_to_convert = []
-    base_input_dir = "" # Used for structuring recursive output
+    base_input_dir = ""
 
     if os.path.isfile(input_path):
-        if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp')): # Added more common types
+        if input_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.webp')):
             images_to_convert = [input_path]
             base_input_dir = os.path.dirname(input_path)
         else:
@@ -57,7 +86,7 @@ def process_images(input_path, output_dir=None, quality=80, lossless=False,
             return
     elif os.path.isdir(input_path):
         base_input_dir = input_path
-        image_extensions = ('.png', '.jpg', '.jpeg', '.tiff', '.bmp') # Added more common types
+        image_extensions = ('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.webp')
         if recursive:
             for root, _, files in os.walk(input_path):
                 for file in files:
@@ -77,7 +106,7 @@ def process_images(input_path, output_dir=None, quality=80, lossless=False,
         return
 
     if not images_to_convert:
-        message = "No supported image files (PNG, JPG, JPEG, TIFF, BMP) found to convert."
+        message = "No supported image files (PNG, JPG, JPEG, TIFF, BMP, WebP) found to convert."
         if progress_callback:
             progress_callback(0, 0, message)
         else:
@@ -89,19 +118,105 @@ def process_images(input_path, output_dir=None, quality=80, lossless=False,
     skipped_count = 0
     failed_count = 0
 
-    with tqdm(total=total_images, desc="Converting Images", unit="img", disable=(progress_callback is not None)) as pbar:
-        for i, input_filepath in enumerate(images_to_convert):
-            current_progress = i + 1 # 1-based index for progress reporting
+    if parallel:
+        if max_workers is None:
+            import multiprocessing
+            max_workers = min(32, (multiprocessing.cpu_count() or 1) + 4)
+        
+        def process_single_file(input_filepath):
             filename = os.path.basename(input_filepath)
             base_filename, _ = os.path.splitext(filename)
             output_webp_filename = base_filename + ".webp"
             
-            target_output_dir_for_file = ""
             if output_dir:
                 if recursive and os.path.isdir(base_input_dir) and base_input_dir != os.path.dirname(input_filepath):
                     relative_subdir = os.path.relpath(os.path.dirname(input_filepath), start=base_input_dir)
                     target_output_dir_for_file = os.path.join(output_dir, relative_subdir)
-                else: # Not recursive, or file is in root of base_input_dir, or input was single file
+                else:
+                    target_output_dir_for_file = output_dir
+            else:
+                target_output_dir_for_file = os.path.dirname(input_filepath)
+            
+            if not os.path.exists(target_output_dir_for_file):
+                try:
+                    os.makedirs(target_output_dir_for_file, exist_ok=True)
+                except OSError as e:
+                    return ('failed', filename, f"Error creating output directory: {e}", None)
+            
+            output_webp_filepath = os.path.join(target_output_dir_for_file, output_webp_filename)
+            
+            if no_overwrite and os.path.exists(output_webp_filepath):
+                rel_path = os.path.relpath(output_webp_filepath, output_dir if output_dir else base_input_dir)
+                return ('skipped', filename, f"Skipping: {filename} (already exists at {rel_path})", output_webp_filepath)
+            
+            try:
+                if convert_image_to_webp(input_filepath, output_webp_filepath, quality, lossless):
+                    rel_path = os.path.relpath(output_webp_filepath, output_dir if output_dir else base_input_dir)
+                    return ('converted', filename, f"Converted: {filename} -> {rel_path}", output_webp_filepath)
+                else:
+                    return ('failed', filename, f"Failed to convert {filename}.", None)
+            except Exception as e:
+                return ('failed', filename, f"Unexpected error processing {filename}: {e}", None)
+        
+        lock = threading.Lock()
+        
+        if progress_callback is None:  # CLI mode with tqdm
+            with tqdm(total=total_images, desc="Converting Images (Parallel)", unit="img") as pbar:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_file = {executor.submit(process_single_file, f): f for f in images_to_convert}
+                    
+                    for future in as_completed(future_to_file):
+                        status, filename, message, output_filepath = future.result()
+                        
+                        with lock:
+                            if status == 'converted':
+                                converted_count += 1
+                            elif status == 'skipped':
+                                skipped_count += 1
+                            elif status == 'failed':
+                                failed_count += 1
+                            pbar.set_postfix_str(f"C:{converted_count} S:{skipped_count} F:{failed_count}")
+                            pbar.update(1)
+                        
+                        print(message)
+        else:  # GUI mode with progress_callback
+            completed = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_file = {executor.submit(process_single_file, f): f for f in images_to_convert}
+                
+                for future in as_completed(future_to_file):
+                    status, filename, message, output_filepath = future.result()
+                    
+                    with lock:
+                        completed += 1
+                        if status == 'converted':
+                            converted_count += 1
+                        elif status == 'skipped':
+                            skipped_count += 1
+                        elif status == 'failed':
+                            failed_count += 1
+                        progress_callback(completed, total_images, message)
+        
+        summary_message = f"Finished. Converted: {converted_count}, Skipped: {skipped_count}, Failed: {failed_count}."
+        if progress_callback:
+            progress_callback(total_images, total_images, summary_message)
+        else:
+            print(summary_message)
+        return
+    
+    # Sequential processing
+    with tqdm(total=total_images, desc="Converting Images", unit="img", disable=(progress_callback is not None)) as pbar:
+        for i, input_filepath in enumerate(images_to_convert):
+            current_progress = i + 1
+            filename = os.path.basename(input_filepath)
+            base_filename, _ = os.path.splitext(filename)
+            output_webp_filename = base_filename + ".webp"
+            
+            if output_dir:
+                if recursive and os.path.isdir(base_input_dir) and base_input_dir != os.path.dirname(input_filepath):
+                    relative_subdir = os.path.relpath(os.path.dirname(input_filepath), start=base_input_dir)
+                    target_output_dir_for_file = os.path.join(output_dir, relative_subdir)
+                else:
                     target_output_dir_for_file = output_dir
             else:
                 target_output_dir_for_file = os.path.dirname(input_filepath)
@@ -116,37 +231,38 @@ def process_images(input_path, output_dir=None, quality=80, lossless=False,
                     else:
                         print(message)
                     pbar.update(1)
-                    failed_count +=1
+                    failed_count += 1
                     continue
 
             output_webp_filepath = os.path.join(target_output_dir_for_file, output_webp_filename)
 
             if no_overwrite and os.path.exists(output_webp_filepath):
-                message = f"Skipping: {filename} (already exists)" # Simpler message for GUI
+                message = f"Skipping: {filename} (already exists)"
                 if progress_callback:
                     progress_callback(current_progress, total_images, message)
                 else:
-                    # More detailed for CLI
-                    print(f"Skipping: {filename} (already exists at {os.path.relpath(output_webp_filepath, output_dir if output_dir else base_input_dir)})")
+                    rel_path = os.path.relpath(output_webp_filepath, output_dir if output_dir else base_input_dir)
+                    print(f"Skipping: {filename} (already exists at {rel_path})")
                 pbar.update(1)
-                skipped_count +=1
+                skipped_count += 1
+                if not progress_callback:
+                    pbar.set_postfix_str(f"C:{converted_count} S:{skipped_count} F:{failed_count}")
                 continue
 
             try:
                 if convert_image_to_webp(input_filepath, output_webp_filepath, quality, lossless):
                     converted_count += 1
-                    message = f"Converted: {filename}" # Simpler message for GUI
+                    message = f"Converted: {filename}"
                     if progress_callback:
                         progress_callback(current_progress, total_images, message)
                     else:
-                        # More detailed for CLI
-                        print(f"Converted: {filename} -> {os.path.relpath(output_webp_filepath, output_dir if output_dir else base_input_dir)}")
+                        rel_path = os.path.relpath(output_webp_filepath, output_dir if output_dir else base_input_dir)
+                        print(f"Converted: {filename} -> {rel_path}")
                 else:
                     failed_count += 1
                     message = f"Failed to convert {filename}."
                     if progress_callback:
                         progress_callback(current_progress, total_images, message)
-                    # convert_image_to_webp prints its own error, so no extra print here for CLI
             except Exception as e:
                 failed_count += 1
                 message = f"Unexpected error processing {filename}: {e}"
@@ -155,47 +271,12 @@ def process_images(input_path, output_dir=None, quality=80, lossless=False,
                 else:
                     print(message)
             finally:
-                 pbar.update(1)
+                pbar.update(1)
+                if not progress_callback:
+                    pbar.set_postfix_str(f"C:{converted_count} S:{skipped_count} F:{failed_count}")
 
     summary_message = f"Finished. Converted: {converted_count}, Skipped: {skipped_count}, Failed: {failed_count}."
     if progress_callback:
         progress_callback(total_images, total_images, summary_message)
     else:
         print(summary_message)
-
-# Example standalone usage:
-if __name__ == '__main__':
-    # Create dummy files/folders for testing
-    test_input_dir = "test_input_converter"
-    test_output_dir = "test_output_converter"
-
-    if not os.path.exists(os.path.join(test_input_dir, "subdir")):
-        os.makedirs(os.path.join(test_input_dir, "subdir"), exist_ok=True)
-    
-    try:
-        Image.new('RGB', (60, 30), color = 'red').save(os.path.join(test_input_dir, "img1.png"))
-        Image.new('RGB', (60, 30), color = 'blue').save(os.path.join(test_input_dir, "img2.jpg"))
-        Image.new('RGB', (60, 30), color = 'green').save(os.path.join(test_input_dir, "subdir", "img3.jpeg"))
-    except ImportError:
-        print("Pillow not installed, cannot create dummy images for test.")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error creating dummy images: {e}")
-        sys.exit(1)
-
-    if not os.path.exists(test_output_dir):
-        os.makedirs(test_output_dir)
-
-    print(f"--- Test 1: Recursive conversion to '{os.path.join(test_output_dir, 'recursive_test')}' ---")
-    process_images(test_input_dir, output_dir=os.path.join(test_output_dir, 'recursive_test'), recursive=True)
-    
-    print(f"\n--- Test 2: Non-recursive to '{os.path.join(test_output_dir, 'non_recursive_test')}' ---")
-    process_images(test_input_dir, output_dir=os.path.join(test_output_dir, 'non_recursive_test'), recursive=False)
-
-    print(f"\n--- Test 3: Single file to '{test_output_dir}' ---")
-    process_images(os.path.join(test_input_dir, "img1.png"), output_dir=test_output_dir)
-
-    print(f"\n--- Test 4: Recursive, no output_dir (save alongside) ---")
-    process_images(test_input_dir, output_dir=None, recursive=True, no_overwrite=True)
-
-    print("\nStandalone tests complete. Check directories and console output.")
