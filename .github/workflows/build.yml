@@ -1,17 +1,26 @@
-name: Build Windows EXE
+name: Build and Release Windows EXE
 
 on:
   push:
     branches: [ main, master ]
     tags:
-      - 'v*'               # با ایجاد تگ (مثل v1.0.0) هم بیلد بشه
+      - 'v*'
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:        # امکان اجرای دستی از طریق GitHub
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'نسخه انتشار'
+        required: false
+        default: '0.1.1-beta'
+      release_notes:
+        description: 'توضیحات انتشار'
+        required: false
+        default: 'نسخه بتا'
 
 jobs:
   build:
-    runs-on: windows-latest  # حتماً ویندوز باشه چون به magick.exe نیاز داری
+    runs-on: windows-latest
     
     steps:
     - name: Checkout code
@@ -20,7 +29,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'  # یا هر نسخه‌ای که استفاده می‌کنی
+        python-version: '3.11'
 
     - name: Install dependencies
       run: |
@@ -32,19 +41,43 @@ jobs:
       run: |
         pyinstaller webp_gui.spec
 
+    - name: Rename EXE with version
+      shell: bash
+      run: |
+        if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          VERSION="${{ github.ref_name }}"
+        else
+          VERSION="${{ github.event.inputs.version || '0.1.1-beta' }}"
+        fi
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        cp dist/WebP_Converter.exe "dist/WebP_Converter_${VERSION}.exe"
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: WebP_Converter_Windows
-        path: dist/WebP_Converter.exe
-        retention-days: 30  # مدت نگهداری (حداکثر 90 روز)
+        name: WebP_Converter_${{ env.VERSION }}
+        path: dist/WebP_Converter_${{ env.VERSION }}.exe
+        retention-days: 30
 
-    # (اختیاری) ساخت Release خودکار هنگام ایجاد تگ
-    - name: Create Release
+    - name: Create Release from Tag
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v2
       with:
-        files: dist/WebP_Converter.exe
+        name: "Release ${{ github.ref_name }}"
+        files: dist/WebP_Converter_${{ env.VERSION }}.exe
         generate_release_notes: true
+        prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Create Manual Release
+      if: github.event_name == 'workflow_dispatch'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: "v${{ github.event.inputs.version }}"
+        name: "Release v${{ github.event.inputs.version }}"
+        body: ${{ github.event.inputs.release_notes }}
+        files: dist/WebP_Converter_${{ env.VERSION }}.exe
+        prerelease: ${{ contains(github.event.inputs.version, 'beta') || contains(github.event.inputs.version, 'alpha') }}
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
